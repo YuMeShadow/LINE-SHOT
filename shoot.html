@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>線條 3D 射擊遊戲 v4.0 (舒適配色版)</title>
+    <style>
+        /* --- 全局配色調整：淺灰底色 --- */
+        body { margin: 0; overflow: hidden; background-color: #eeeeee; font-family: monospace; user-select: none; color: #333; }
+        
+        /* UI 層 */
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; }
+        /* 資訊文字改為深灰色，移除刺眼的霓虹光暈 */
+        #info { position: absolute; top: 20px; left: 20px; color: #333; font-size: 20px; font-weight: bold; }
+        .stat-label { color: #666; font-weight: normal; }
+        
+        /* 準心改為深灰色 */
+        #crosshair {
+            position: absolute; top: 50%; left: 50%; width: 20px; height: 20px;
+            transform: translate(-50%, -50%);
+        }
+        #crosshair::before, #crosshair::after { content: ''; position: absolute; background: #555; }
+        #crosshair::before { top: 9px; left: 0; width: 20px; height: 2px; }
+        #crosshair::after { top: 0; left: 9px; width: 2px; height: 20px; }
+
+        /* 小地圖樣式調整 */
+        #minimap-container {
+            position: absolute; top: 20px; right: 20px; width: 150px; height: 150px;
+            background: rgba(240, 240, 240, 0.9); /* 淺色半透明背景 */
+            border: 2px solid #888; /* 灰色邊框 */
+            border-radius: 50%; overflow: hidden;
+        }
+        
+        /* 換彈提示改為深橙色 */
+        #reload-msg {
+            position: absolute; top: 60%; left: 50%; transform: translateX(-50%);
+            color: #d35400; font-size: 24px; display: none; font-weight: bold;
+        }
+
+        /* 暫停/開始遮罩：淺色系 */
+        #blocker {
+            position: absolute; width: 100%; height: 100%; background-color: rgba(255,255,255,0.8);
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            color: #333; z-index: 20; pointer-events: auto;
+        }
+        #instructions { text-align: center; cursor: pointer; border: 2px solid #555; padding: 40px; background: #f9f9f9; box-shadow: 0 0 20px rgba(0,0,0,0.1); }
+        .key { display: inline-block; border: 1px solid #555; color: #333; padding: 2px 6px; border-radius: 4px; margin: 0 2px; background: #eee;}
+        
+        /* 載入提示 */
+        #loader {
+            position: fixed; top:0; left:0; width:100%; height:100%; background: #eeeeee; color: #333;
+            display: flex; justify-content: center; align-items: center; z-index: 999; font-size: 24px;
+        }
+    </style>
+</head>
+<body>
+    <div id="loader">正在載入系統...<br>Loading Blueprint Engine...</div>
+
+    <div id="ui-layer">
+        <div id="info">
+            <div><span class="stat-label">SCORE:</span> <span id="score">0</span></div>
+            <div style="margin-top:5px;"><span class="stat-label">HP:</span> <span id="health" style="color:#27ae60">100</span></div>
+            <div style="margin-top:5px;"><span class="stat-label">AMMO:</span> <span id="ammo">30 / 60</span></div>
+        </div>
+        <div id="crosshair"></div>
+        <div id="reload-msg">RELOADING...</div>
+        <div id="minimap-container"><canvas id="minimap" width="150" height="150"></canvas></div>
+    </div>
+
+    <div id="blocker" style="display:none;">
+        <div id="instructions">
+            <h1 style="margin:0 0 20px 0; color:#333;">BLUEPRINT SHOOTER</h1>
+            <p>點擊畫面啟動模擬</p>
+            <p><span class="key">W</span><span class="key">A</span><span class="key">S</span><span class="key">D</span> 移動</p>
+            <p><span class="key">滑鼠</span> 瞄準 / 射擊</p>
+            <p><span class="key">R</span> 換彈</p>
+        </div>
+    </div>
+
+    <script>
+        window.onerror = function(msg, url, line) {
+            alert("錯誤: " + msg); document.getElementById('loader').innerText = "Error";
+        };
+    </script>
+
+    <script src="https://unpkg.com/three@0.126.0/build/three.min.js"></script>
+    <script src="https://unpkg.com/three@0.126.0/examples/js/controls/PointerLockControls.js"></script>
+
+    <script>
+        window.onload = function() {
+            if (typeof THREE === 'undefined') { alert("載入失敗，請檢查網路"); return; }
+            document.getElementById('loader').style.display = 'none';
+            document.getElementById('blocker').style.display = 'flex';
+            init(); animate();
+        };
+
+        let camera, scene, renderer, controls;
+        let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
+        let prevTime = performance.now();
+        const velocity = new THREE.Vector3();
+        const direction = new THREE.Vector3();
+
+        let gun;
+        const bullets = [];
+        const enemies = [];
+        const items = [];
+        
+        let score = 0, health = 100, isGameOver = false;
+        const MAX_CLIP = 30;
+        let ammoInClip = 30, totalAmmo = 60, isReloading = false;
+
+        const scoreEl = document.getElementById('score');
+        const healthEl = document.getElementById('health');
+        const ammoEl = document.getElementById('ammo');
+        const reloadMsg = document.getElementById('reload-msg');
+        const instructions = document.getElementById('instructions');
+        const blocker = document.getElementById('blocker');
+        const ctx = document.getElementById('minimap').getContext('2d');
+
+        function init() {
+            scene = new THREE.Scene();
+            // --- 關鍵修改：霧氣改為淺灰色，與背景融合 ---
+            scene.background = new THREE.Color(0xeeeeee);
+            scene.fog = new THREE.Fog(0xeeeeee, 0, 100);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.y = 1.7;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            controls = new THREE.PointerLockControls(camera, document.body);
+
+            instructions.addEventListener('click', () => controls.lock());
+            controls.addEventListener('lock', () => { instructions.style.display = 'none'; blocker.style.display = 'none'; if(isGameOver) resetGame(); });
+            controls.addEventListener('unlock', () => { blocker.style.display = 'flex'; if(!isGameOver) { instructions.innerHTML = '<h1>已暫停</h1><p>點擊繼續</p>'; instructions.style.display = 'block'; } });
+            scene.add(controls.getObject());
+
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('keyup', onKeyUp);
+            document.addEventListener('mousedown', onMouseDown);
+            window.addEventListener('resize', onWindowResize);
+
+            // --- 關鍵修改：舒適的網格配色 ---
+            
+            // 1. 地板網格：主線中灰(0x888888)，次線淺灰(0xcccccc)
+            const floorGrid = new THREE.GridHelper(200, 80, 0x888888, 0xcccccc);
+            scene.add(floorGrid);
+
+            // 2. 天花板網格：稍微淡一點的灰色，區分上下
+            const ceilingGrid = new THREE.GridHelper(200, 40, 0xaaaaaa, 0xdddddd);
+            ceilingGrid.position.y = 10;
+            scene.add(ceilingGrid);
+
+            // 3. 地平線：中灰色
+            const horizonGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-100, 1.7, -100), new THREE.Vector3(100, 1.7, -100)]);
+            const horizonMat = new THREE.LineBasicMaterial({ color: 0xaaaaaa });
+            scene.add(new THREE.Line(horizonGeo, horizonMat));
+
+            createGun();
+            setInterval(spawnEnemy, 2000);
+            setInterval(spawnItem, 10000);
+            updateUI();
+        }
+
+        function createGun() {
+            const gunGeo = new THREE.BoxGeometry(0.15, 0.2, 0.6);
+            const gunEdges = new THREE.EdgesGeometry(gunGeo);
+            // 槍枝顏色：工程藍圖藍
+            const gunMat = new THREE.LineBasicMaterial({ color: 0x0066cc, linewidth: 2 });
+            gun = new THREE.LineSegments(gunEdges, gunMat);
+            gun.position.set(0.25, -0.25, -0.4);
+            camera.add(gun);
+        }
+
+        function createWireframeBox(w, h, d, color) {
+            const geo = new THREE.BoxGeometry(w, h, d);
+            const edges = new THREE.EdgesGeometry(geo);
+            const mat = new THREE.LineBasicMaterial({ color: color });
+            return new THREE.LineSegments(edges, mat);
+        }
+
+        function spawnEnemy() {
+            if (!controls.isLocked || isGameOver) return;
+            // 敵人顏色：柔和的深紅色 (Crimson)
+            const enemy = createWireframeBox(1.2, 2.0, 1.2, 0xc0392b);
+            const angle = Math.random() * Math.PI * 2;
+            const radius = 30 + Math.random() * 40;
+            enemy.position.set(
+                camera.position.x + Math.cos(angle) * radius,
+                1,
+                camera.position.z + Math.sin(angle) * radius
+            );
+            enemies.push(enemy);
+            scene.add(enemy);
+        }
+
+        function spawnItem() {
+            if (!controls.isLocked || isGameOver) return;
+            // 道具顏色：柔和的橙金色
+            const item = createWireframeBox(1, 1, 1, 0xf39c12);
+            const angle = Math.random() * Math.PI * 2;
+            const radius = 20 + Math.random() * 40;
+            item.position.set(camera.position.x + Math.cos(angle) * radius, 0.5, camera.position.z + Math.sin(angle) * radius);
+            item.type = Math.random() > 0.5 ? 'ammo' : 'health';
+            items.push(item);
+            scene.add(item);
+        }
+
+        function onKeyDown(e) {
+            switch (e.code) {
+                case 'KeyW': moveForward = true; break;
+                case 'KeyA': moveLeft = true; break;
+                case 'KeyS': moveBackward = true; break;
+                case 'KeyD': moveRight = true; break;
+                case 'KeyR': reload(); break;
+            }
+        }
+        function onKeyUp(e) {
+            switch (e.code) {
+                case 'KeyW': moveForward = false; break;
+                case 'KeyA': moveLeft = false; break;
+                case 'KeyS': moveBackward = false; break;
+                case 'KeyD': moveRight = false; break;
+            }
+        }
+        function onMouseDown(e) { if (e.button === 0 && controls.isLocked && !isGameOver) shoot(); }
+
+        function shoot() {
+            if (isReloading || ammoInClip <= 0) {
+                if(ammoInClip <= 0) { reloadMsg.innerText = "NO AMMO"; reloadMsg.style.display = "block"; setTimeout(()=>reloadMsg.style.display="none", 1000); }
+                return;
+            }
+            ammoInClip--; updateUI();
+            gun.position.z += 0.15;
+
+            const bGeo = new THREE.BoxGeometry(0.02, 0.02, 1.5);
+            // 子彈顏色：明亮的天藍色
+            const bMat = new THREE.MeshBasicMaterial({ color: 0x0099ff });
+            const bullet = new THREE.Mesh(bGeo, bMat);
+
+            const vector = new THREE.Vector3(); gun.getWorldPosition(vector); bullet.position.copy(vector);
+            const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+            bullet.lookAt(bullet.position.clone().add(dir));
+            bullet.velocity = dir.multiplyScalar(80);
+            bullet.creationTime = performance.now();
+            bullets.push(bullet); scene.add(bullet);
+        }
+
+        function reload() {
+            if (isReloading || ammoInClip === MAX_CLIP || totalAmmo <= 0) return;
+            isReloading = true; reloadMsg.innerText = "RELOADING..."; reloadMsg.style.display = "block";
+            setTimeout(() => {
+                const needed = MAX_CLIP - ammoInClip;
+                const toAdd = Math.min(needed, totalAmmo);
+                ammoInClip += toAdd; totalAmmo -= toAdd;
+                isReloading = false; reloadMsg.style.display = "none"; updateUI();
+            }, 1500);
+        }
+
+        function updateUI() {
+            scoreEl.innerText = score;
+            healthEl.innerText = health;
+            // 血量顏色：健康的綠色 -> 警告的橙色 -> 危險的紅色 (柔和版)
+            healthEl.style.color = health > 50 ? '#27ae60' : (health > 20 ? '#d35400' : '#c0392b');
+            ammoEl.innerText = `${ammoInClip} / ${totalAmmo}`;
+        }
+
+        function drawMinimap() {
+            // 小地圖背景改為淺灰半透明
+            ctx.fillStyle = 'rgba(240, 240, 240, 0.8)'; ctx.fillRect(0, 0, 150, 150);
+            
+            // 雷達線改為淺灰色
+            ctx.strokeStyle = '#cccccc'; ctx.beginPath(); ctx.moveTo(75, 0); ctx.lineTo(75, 150); ctx.moveTo(0, 75); ctx.lineTo(150, 75); ctx.stroke();
+
+            const cx = 75, cy = 75, range = 50, scale = 75 / range;
+            // 玩家改為深灰色
+            ctx.fillStyle = '#333'; ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI * 2); ctx.fill(); 
+            
+            const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+            ctx.strokeStyle = '#333'; ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + dir.x * 15, cy + dir.z * 15); ctx.stroke();
+
+            enemies.forEach(e => {
+                const dx = e.position.x - camera.position.x, dz = e.position.z - camera.position.z;
+                if (Math.abs(dx) < range && Math.abs(dz) < range) {
+                    // 敵人小點：深紅色
+                    ctx.fillStyle = '#c0392b'; ctx.beginPath(); ctx.arc(cx + dx * scale, cy + dz * scale, 3, 0, Math.PI * 2); ctx.fill();
+                }
+            });
+            items.forEach(i => {
+                const dx = i.position.x - camera.position.x, dz = i.position.z - camera.position.z;
+                if (Math.abs(dx) < range && Math.abs(dz) < range) {
+                    // 道具小點：橙金色
+                    ctx.fillStyle = '#f39c12'; ctx.fillRect(cx + dx * scale - 2, cy + dz * scale - 2, 4, 4);
+                }
+            });
+        }
+
+        function resetGame() {
+            isGameOver = false; score = 0; health = 100; ammoInClip = MAX_CLIP; totalAmmo = 60;
+            camera.position.set(0, 1.7, 0);
+            enemies.forEach(e => scene.remove(e)); enemies.length = 0;
+            bullets.forEach(b => scene.remove(b)); bullets.length = 0;
+            items.forEach(i => scene.remove(i)); items.length = 0;
+            updateUI();
+            // 重置背景色 (以防死在紅屏狀態)
+            document.body.style.backgroundColor = '#eeeeee';
+        }
+
+        function endGame() {
+            isGameOver = true; controls.unlock();
+            instructions.innerHTML = `<h1 style="color:#c0392b">GAME OVER</h1><p>SCORE: ${score}</p><p>點擊重新開始</p>`; instructions.style.display = 'block';
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if (!controls.isLocked || isGameOver) return;
+            const time = performance.now(); const delta = (time - prevTime) / 1000; prevTime = time;
+
+            velocity.x -= velocity.x * 10.0 * delta; velocity.z -= velocity.z * 10.0 * delta;
+            direction.z = Number(moveForward) - Number(moveBackward); direction.x = Number(moveRight) - Number(moveLeft);
+            direction.normalize();
+            if (moveForward || moveBackward) velocity.z -= direction.z * 400.0 * delta;
+            if (moveLeft || moveRight) velocity.x -= direction.x * 400.0 * delta;
+            controls.moveRight(-velocity.x * delta); controls.moveForward(-velocity.z * delta);
+
+            gun.position.z = THREE.MathUtils.lerp(gun.position.z, -0.4, 0.1);
+            gun.rotation.x = THREE.MathUtils.lerp(gun.rotation.x, isReloading ? -1 : 0, 0.1);
+
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                const b = bullets[i]; b.position.add(b.velocity.clone().multiplyScalar(delta));
+                if (time - b.creationTime > 2000) { scene.remove(b); bullets.splice(i, 1); continue; }
+                for (let j = enemies.length - 1; j >= 0; j--) {
+                    if (b.position.distanceTo(enemies[j].position) < 1.5) {
+                        scene.remove(b); bullets.splice(i, 1); scene.remove(enemies[j]); enemies.splice(j, 1);
+                        score += 10; updateUI(); break;
+                    }
+                }
+            }
+            const pPos = camera.position;
+            for (let i = enemies.length - 1; i >= 0; i--) {
+                const e = enemies[i];
+                const dir = pPos.clone().sub(e.position); dir.y = 0; dir.normalize();
+                e.position.add(dir.multiplyScalar(8 * delta)); e.lookAt(pPos);
+                if (e.position.distanceTo(pPos) < 1.5) {
+                    health -= 15; updateUI(); scene.remove(e); enemies.splice(i, 1);
+                    // 受傷閃爍改為柔和的淺紅色
+                    document.body.style.backgroundColor = '#d0a0a0'; setTimeout(()=>document.body.style.backgroundColor='#eeeeee',50);
+                    if (health <= 0) endGame();
+                }
+            }
+            for (let i = items.length - 1; i >= 0; i--) {
+                const it = items[i]; it.rotation.y += delta;
+                if (it.position.distanceTo(pPos) < 2.0) {
+                    if (it.type === 'ammo') { totalAmmo += 30; reloadMsg.innerText = "+AMMO"; } else { health = Math.min(health + 20, 100); reloadMsg.innerText = "+HEALTH"; }
+                    reloadMsg.style.display = "block"; setTimeout(() => { if(!isReloading) reloadMsg.style.display = "none" }, 1000);
+                    updateUI(); scene.remove(it); items.splice(i, 1);
+                }
+            }
+            drawMinimap();
+            renderer.render(scene, camera);
+        }
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+    </script>
+</body>
+</html>
